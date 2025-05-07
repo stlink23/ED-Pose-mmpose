@@ -10,3 +10,5 @@ E:\code\mmpose\mmpose\models\heads\transformer_heads\transformers\box_ops.py
 2第二步，运行
 修改train.py里面的参数
 python mmpose\tools\train.py
+
+参考:https://github.com/IDEA-Research/ED-Pose
