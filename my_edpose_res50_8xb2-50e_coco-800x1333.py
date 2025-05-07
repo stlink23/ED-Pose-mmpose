@@ -1,4 +1,4 @@
-#000000079841.jpg
+
 # Copyright (c) OpenMMLab. All rights reserved.
 from mmengine.config import read_base
 with read_base():
@@ -53,12 +53,12 @@ auto_scale_lr = dict(base_batch_size=80)
 default_hooks.update(  # noqa
     checkpoint=dict(
         save_best='coco/AP', rule='greater',interval=1,max_keep_ckpts=3,
-        out_dir="E:\\code\\mmpose\\work-dirs\\edpose"),
+        out_dir=""),
     visualization=dict(
         type='mmpose.engine.hooks.visualization_hook.PoseVisualizationHook',
         enable=True,
         interval=1,
-        out_dir='E:\\code\\mmpose\\work-dir\\vis',
+        out_dir='',
         show=False))
 
 # codec settings
@@ -84,8 +84,7 @@ model = dict(
         style='pytorch',
         init_cfg=dict(
             #type=PretrainedInit, checkpoint='torchvision://resnet50')),
-            type=PretrainedInit, checkpoint='E:\\code\\mmpose\\edpose_res50_coco_3rdparty.pth')),
-            #type=PretrainedInit, checkpoint='E:\\code\\ED-Pose-master\\edpose_r50_coco.pth')),
+            type=PretrainedInit, checkpoint='edpose_res50_coco_3rdparty.pth')),
     neck=dict(
         type=ChannelMapper,
         in_channels=[512, 1024, 2048],
@@ -161,7 +160,7 @@ model = dict(
                 loss_bbox= 5.0,
                 loss_keypoints=10.0,
                 loss_oks= 4.0,
-                loss_giou=2.0)),       #需要移植，loss的配置  
+                loss_giou=2.0)),       
         data_decoder=codec),
         
     test_cfg=dict(Pmultiscale_test=False, flip_test=False, num_select=50),
@@ -173,7 +172,7 @@ find_unused_parameters = True
 # base dataset settings
 dataset_type = CocoDataset
 data_mode = 'bottomup'
-data_root = 'E:\\coco2017'
+data_root = ''
 
 # pipelines
 train_pipeline = [
@@ -244,7 +243,6 @@ train_dataloader = dict(
         data_prefix=dict(img='train2017/'),
         pipeline=train_pipeline,
         # filter_cfg=dict(filter_empty_gt=True, min_keypoints=3),
-        indices=256,  # 设置 indices=128，表示每个 epoch 只迭代 5000 个样本
     ))
 
 val_dataloader = dict(
@@ -261,7 +259,6 @@ val_dataloader = dict(
         data_prefix=dict(img='val2017/'),
         test_mode=True,
         pipeline=val_pipeline,
-        indices=256,  # 设置 indices=128，表示每个 epoch 只迭代 5000 个样本
     ))
 test_dataloader = val_dataloader
 
