@@ -8,4 +8,5 @@ mmpose\models\heads\transformer_heads\matcher.py
 mmpose\models\heads\transformer_heads\transformers\utils.py
 E:\code\mmpose\mmpose\models\heads\transformer_heads\transformers\box_ops.py
 2第二步，运行
-python E:\code\mmpose\tools\train.py
+修改train.py里面的参数
+python mmpose\tools\train.py
