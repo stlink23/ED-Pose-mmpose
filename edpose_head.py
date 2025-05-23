@@ -1,7 +1,6 @@
 import copy
 import math
 from typing import Dict, List, Tuple
-
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -9,18 +8,17 @@ from mmcv.ops import MultiScaleDeformableAttention
 from mmengine.model import BaseModule, ModuleList, constant_init
 from mmengine.structures import InstanceData
 from torch import Tensor, nn
-
 from mmpose.models.utils import inverse_sigmoid
 from mmpose.registry import KEYPOINT_CODECS, MODELS
 from mmpose.utils.tensor_utils import to_numpy
-from mmpose.utils.typing import (ConfigType, Features, OptConfigType,
-                                 OptSampleList, Predictions)
+from mmpose.utils.typing import (ConfigType, Features, OptConfigType,OptSampleList, Predictions)
 from .base_transformer_head import TransformerHead
 from .transformers.deformable_detr_layers import (
     DeformableDetrTransformerDecoderLayer, DeformableDetrTransformerEncoder)
 from .transformers.utils import FFN, PositionEmbeddingSineHW
 from .criterion import SetCriterion   #需要移植的loss函数
 from .matcher import HungarianMatcher  #需要移植的matcher
+from .transformers.box_ops import box_cxcywh_to_xyxy, box_xyxy_to_cxcywh
 
 class EDPoseDecoder(BaseModule):
     """Transformer decoder of EDPose: `Explicit Box Detection Unifies End-to-
@@ -51,20 +49,27 @@ class EDPoseDecoder(BaseModule):
                  num_dn=100,
                  num_group=100):
         super().__init__()
+
         self.layer_cfg = layer_cfg
         self.num_layers = num_layers
         self.embed_dims = embed_dims
+
         assert return_intermediate, 'support return_intermediate only'
         self.return_intermediate = return_intermediate
-        assert query_dim in [ 2, 4], 'query_dim should be 2/4 but {}'.format(query_dim)
 
+        assert query_dim in [
+            2, 4
+        ], 'query_dim should be 2/4 but {}'.format(query_dim)
         self.query_dim = query_dim
+
         self.num_feature_levels = num_feature_levels
+
         self.layers = ModuleList([
             DeformableDetrTransformerDecoderLayer(**self.layer_cfg)
             for _ in range(self.num_layers)
         ])
         self.norm = nn.LayerNorm(self.embed_dims)
+
         self.ref_point_head = FFN(self.query_dim // 2 * self.embed_dims,
                                   self.embed_dims, self.embed_dims, 2)
 
@@ -113,10 +118,8 @@ class EDPoseDecoder(BaseModule):
                 levels, has shape (bs, num_levels, 2).
             reg_branches: (obj:`nn.ModuleList`, optional): Used for refining
                 the regression results.
-
         Returns:
             Tuple[Tuple[Tensor]]: Outputs of Deformable Transformer Decoder.
-
             - output (Tuple[Tensor]): Output embeddings of the last decoder,
               each has shape (num_decoder_layers, num_queries, bs, embed_dims)
             - reference_points (Tensor): The reference of the last decoder
@@ -152,8 +155,7 @@ class EDPoseDecoder(BaseModule):
                 spatial_shapes=spatial_shapes,
                 level_start_index=level_start_index,
                 valid_ratios=valid_ratios,
-                reference_points=reference_points_input.transpose(
-                    0, 1).contiguous(),
+                reference_points=reference_points_input.transpose(0, 1).contiguous(),
                 self_attn_mask=attn_mask,
                 **kwargs)
             output = output.transpose(0, 1)
@@ -162,16 +164,14 @@ class EDPoseDecoder(BaseModule):
             # human update
             if layer_id < self.num_box_decoder_layers:
                 delta_unsig = self.bbox_embed[layer_id](output)
-                new_reference_points = delta_unsig + inverse_sigmoid(
-                    reference_points)
+                new_reference_points = delta_unsig + inverse_sigmoid(reference_points)
                 new_reference_points = new_reference_points.sigmoid()
 
             # query expansion
             if layer_id == self.num_box_decoder_layers - 1:
                 dn_output = output[:effect_num_dn]
                 dn_new_reference_points = new_reference_points[:effect_num_dn]
-                class_unselected = self.class_embed[layer_id](
-                    output)[effect_num_dn:]
+                class_unselected = self.class_embed[layer_id](output)[effect_num_dn:]
                 topk_proposals = torch.topk(
                     class_unselected.max(-1)[0], inter_select_number, dim=0)[1]
                 new_reference_points_for_box = torch.gather(
@@ -184,11 +184,9 @@ class EDPoseDecoder(BaseModule):
                 new_output_for_keypoint = new_output_for_box[:, None, :, :] \
                     + self.keypoint_embed.weight[None, :, None, :]
                 if self.num_keypoints == 17:
-                    delta_xy = self.pose_embed[-1](new_output_for_keypoint)[
-                        ..., :2]
+                    delta_xy = self.pose_embed[-1](new_output_for_keypoint)[..., :2]
                 else:
-                    delta_xy = self.pose_embed[0](new_output_for_keypoint)[
-                        ..., :2]
+                    delta_xy = self.pose_embed[0](new_output_for_keypoint)[..., :2]
                 keypoint_xy = (inverse_sigmoid(
                     new_reference_points_for_box[..., :2][:, None]) +
                                delta_xy).sigmoid()
@@ -217,21 +215,15 @@ class EDPoseDecoder(BaseModule):
                 inter_select_number = self.num_group
                 ref_before_sigmoid = inverse_sigmoid(reference_points)
                 output_bbox_dn = output[:effect_num_dn]
-                output_bbox_norm = output[effect_num_dn:][0::(
-                    self.num_keypoints + 1)]
-                ref_before_sigmoid_bbox_dn = \
-                    ref_before_sigmoid[:effect_num_dn]
-                ref_before_sigmoid_bbox_norm = \
-                    ref_before_sigmoid[effect_num_dn:][0::(
-                        self.num_keypoints + 1)]
+                output_bbox_norm = output[effect_num_dn:][0::(self.num_keypoints + 1)]
+                ref_before_sigmoid_bbox_dn = ref_before_sigmoid[:effect_num_dn]
+                ref_before_sigmoid_bbox_norm=ref_before_sigmoid[effect_num_dn:][0::(self.num_keypoints + 1)]
                 delta_unsig_dn = self.bbox_embed[layer_id](output_bbox_dn)
                 delta_unsig_norm = self.bbox_embed[layer_id](output_bbox_norm)
                 outputs_unsig_dn = delta_unsig_dn + ref_before_sigmoid_bbox_dn
-                outputs_unsig_norm = delta_unsig_norm + \
-                    ref_before_sigmoid_bbox_norm
+                outputs_unsig_norm = delta_unsig_norm + ref_before_sigmoid_bbox_norm
                 new_reference_points_for_box_dn = outputs_unsig_dn.sigmoid()
-                new_reference_points_for_box_norm = outputs_unsig_norm.sigmoid(
-                )
+                new_reference_points_for_box_norm = outputs_unsig_norm.sigmoid()
                 output_kpt = output[effect_num_dn:].index_select(
                     0, torch.tensor(self.kpt_index, device=output.device))
                 delta_xy_unsig = self.pose_embed[layer_id -
@@ -242,16 +234,14 @@ class EDPoseDecoder(BaseModule):
                         0, torch.tensor(self.kpt_index,
                                         device=output.device)).clone()
                 delta_hw_unsig = self.pose_hw_embed[
-                    layer_id - self.num_box_decoder_layers](
-                        output_kpt)
+                    layer_id - self.num_box_decoder_layers](output_kpt)
                 outputs_unsig[..., :2] += delta_xy_unsig[..., :2]
                 outputs_unsig[..., 2:] += delta_hw_unsig
                 new_reference_points_for_keypoint = outputs_unsig.sigmoid()
                 bs = new_reference_points_for_box_norm.shape[1]
                 new_reference_points_norm = torch.cat(
                     (new_reference_points_for_box_norm.unsqueeze(1),
-                     new_reference_points_for_keypoint.view(
-                         -1, self.num_keypoints, bs, 4)),
+                     new_reference_points_for_keypoint.view(-1, self.num_keypoints, bs, 4)),
                     dim=1).flatten(0, 1)
                 new_reference_points = torch.cat(
                     (new_reference_points_for_box_dn,
@@ -266,9 +256,6 @@ class EDPoseDecoder(BaseModule):
             itm_refpoint.transpose(0, 1)
             for itm_refpoint in intermediate_reference_points
         ]
-        # decoder_outputs->list,每个元素是一个tensor， 每个Tensor的形状为(bs, num_queries, embed_dims)
-        # reference_points->list,每个元素是一个tensor， 每个Tensor的形状为(bs, num_queries, 4)  4：表示(cx, cy, w, h)，即中心点坐标和宽高
-        #bs：batch_size，num_queries：查询数量，等于num_group * (num_keypoints + 1)，embed_dims：特征维度，默认256
         return decoder_outputs, reference_points
 
     @staticmethod
@@ -286,7 +273,6 @@ class EDPoseDecoder(BaseModule):
                 position along x, y, w, and h-axis. Note the final returned
                 dimension for each position is 4 times of num_pos_feats.
                 Default to 128.
-
         Returns:
             Tensor: The position embedding of proposal, has shape
             (bs, num_queries, num_pos_feats * 4), with the last dimension
@@ -328,6 +314,7 @@ class EDPoseDecoder(BaseModule):
 class EDPoseOutHead(BaseModule):
     """Final Head of EDPose: `Explicit Box Detection Unifies End-to-End Multi-
     Person Pose Estimation.
+
     Args:
         num_classes (int): The number of classes.
         num_keypoints (int): The number of datasets' body keypoints.
@@ -349,6 +336,7 @@ class EDPoseOutHead(BaseModule):
         dec_pred_pose_embed_share (bool): Whether to share parameters
             for all the pose prediction layers. Defaults to `False`.
     """
+
     def __init__(self,
                  num_classes,
                  num_keypoints: int = 17,
@@ -439,6 +427,7 @@ class EDPoseOutHead(BaseModule):
 
     def init_weights(self) -> None:
         """Initialize weights of the Deformable DETR head."""
+
         for m in self.bbox_embed:
             constant_init(m.layers[-1], 0, bias=0)
         for m in self.pose_embed:
@@ -454,7 +443,6 @@ class EDPoseOutHead(BaseModule):
             references (list[Tensor]): List of the reference from the decoder.
         Returns:
             tuple[Tensor]: results of head containing the following tensor.
-
             - pred_logits (Tensor): Outputs from the
               classification head, the socres of every bboxes.
             - pred_boxes (Tensor): The output boxes.
@@ -470,8 +458,7 @@ class EDPoseOutHead(BaseModule):
                               self.class_embed, hidden_states)):
             if dec_lid < self.num_box_decoder_layers:
                 layer_delta_unsig = layer_bbox_embed(layer_hs)
-                layer_outputs_unsig = layer_delta_unsig + inverse_sigmoid(
-                    layer_ref_sig)
+                layer_outputs_unsig = layer_delta_unsig + inverse_sigmoid(layer_ref_sig)
                 layer_outputs_unsig = layer_outputs_unsig.sigmoid()
                 layer_cls = layer_cls_embed(layer_hs)
                 outputs_coord_list.append(layer_outputs_unsig)
@@ -549,18 +536,11 @@ class EDPoseOutHead(BaseModule):
                     outputs_class, outputs_coord_list,
                     outputs_keypoints_list, dn_mask_dict
                 )
+        for _out_class, _out_bbox, _out_keypoint in zip(outputs_class, outputs_coord_list, outputs_keypoints_list):
+            assert _out_class.shape[1] == _out_bbox.shape[1] == _out_keypoint.shape[1]
 
-        for _out_class, _out_bbox, _out_keypoint in zip(
-                outputs_class, outputs_coord_list, outputs_keypoints_list):
-            assert _out_class.shape[1] == \
-                _out_bbox.shape[1] == _out_keypoint.shape[1]
+        return outputs_class[-1], outputs_coord_list[-1], outputs_keypoints_list[-1], dn_mask_dict
 
-        # 最后一层decoder预测结果，所有坐标都是相对坐标（归一化到[0,1]范围）
-        #outputs_class[-1] ：分类预测结果，(bs, num_queries, num_classes)，num_classes：类别数量，通常为1（只区分人/非人）
-        #outputs_coord_list[-1]：人体边界框预测结果，(bs, num_queries, 4)，- 4：表示(cx, cy, w, h)，即中心点坐标和宽高值域：[0,1]，通过sigmoid函数归一化
-        #outputs_keypoints_list[-1]：关键点预测结果，(bs, num_queries, num_keypoints * 3)，- 4：表示(cx, cy, w, h)，即中心点坐标和宽高值域：[0,1]，通过sigmoid函数归一化
-        return outputs_class[-1], outputs_coord_list[-1], outputs_keypoints_list[-1]
-        
     def dn_post_process2(self, outputs_class, outputs_coord, outputs_keypoints_list, mask_dict):
         """Process the outputs of the denoising process.
         Args:
@@ -632,24 +612,26 @@ class EDPoseHead(TransformerHead):
         two_stage_keep_all_tokens (bool): Whether to keep all tokens.
     """
     def __init__(self,
-                 num_queries: int = 100,#查询的数量,即预测的目标数量
+                 num_queries: int = 100,
                  num_feature_levels: int = 4,
                  num_keypoints: int = 17,
-                 num_classes: int = 2,
-                 dn_labelbook_size = 100,#标签字典大小
                  as_two_stage: bool = False,
-                 encoder: OptConfigType = None,#
-                 decoder: OptConfigType = None,#
-                 out_head: OptConfigType = None,#
-                 positional_encoding: OptConfigType = None,#
+                 encoder: OptConfigType = None,
+                 decoder: OptConfigType = None,
+                 out_head: OptConfigType = None,
+                 positional_encoding: OptConfigType = None,
                  data_decoder: OptConfigType = None,
                  denosing_cfg: OptConfigType = None,
-                 loss_cfg: OptConfigType = None,  #需要移植，loss的配置
-                 dec_pred_class_embed_share: bool = False,#是否共享解码器的类别预测嵌入
-                 dec_pred_bbox_embed_share: bool = False,#是否共享解码器的边界框预测嵌入
-                 refine_queries_num: int = 100,#?
+                 loss_cfg: OptConfigType = None,
+                 dec_pred_class_embed_share: bool = False,
+                 dec_pred_bbox_embed_share: bool = False,
+                 refine_queries_num: int = 100,
+                 num_classes: int = 2,
+                 dn_labelbook_size: int = 100,
                  two_stage_keep_all_tokens: bool = False) -> None:
+                 
 
+        self.num_queries = num_queries
         self.as_two_stage = as_two_stage
         self.num_feature_levels = num_feature_levels
         self.refine_queries_num = refine_queries_num
@@ -659,10 +641,15 @@ class EDPoseHead(TransformerHead):
         self.num_heads = decoder['layer_cfg']['self_attn_cfg']['num_heads']
         self.num_group = decoder['num_group']
         self.num_keypoints = num_keypoints
-        self.num_classes = num_classes
-        self.dn_labelbook_size = 100 #标签字典大小
+        self.dn_labelbook_size=dn_labelbook_size
         self.denosing_cfg = denosing_cfg
-        self.loss_cfg = loss_cfg    #需要移植，loss的配置
+        self.loss_cfg = loss_cfg
+        self.use_dn = self.loss_cfg['use_dn']
+        self.aux_loss = self.loss_cfg['aux_loss']
+        self.dn_number = self.loss_cfg['dn_number']
+        self.label_noise_ratio = self.denosing_cfg.get('label_noise_ratio', 0.2) # From DINO
+        self.box_noise_scale = self.denosing_cfg.get('box_noise_scale', 0.4)   # From DINO
+        self.dn_positive_scalar = self.denosing_cfg.get('dn_positive_scalar', 1.0)
         if data_decoder is not None:
             self.data_decoder = KEYPOINT_CODECS.build(data_decoder)
         else:
@@ -675,9 +662,11 @@ class EDPoseHead(TransformerHead):
             positional_encoding=positional_encoding,
             num_queries=num_queries)
 
-        self.positional_encoding = PositionEmbeddingSineHW(**self.positional_encoding_cfg)
+        self.positional_encoding = PositionEmbeddingSineHW(
+            **self.positional_encoding_cfg)
         self.encoder = DeformableDetrTransformerEncoder(**self.encoder_cfg)
-        self.decoder = EDPoseDecoder(num_keypoints=num_keypoints, **self.decoder_cfg)
+        self.decoder = EDPoseDecoder(
+            num_keypoints=num_keypoints, **self.decoder_cfg)
         self.out_head = EDPoseOutHead(
             num_keypoints=num_keypoints,
             as_two_stage=as_two_stage,
@@ -686,30 +675,78 @@ class EDPoseHead(TransformerHead):
             **self.decoder_cfg)
 
         self.embed_dims = self.encoder.embed_dims
-        self.label_enc = nn.Embedding(self.denosing_cfg['dn_labelbook_size'] + 1, self.embed_dims)
+        if self.use_dn:
+            self.label_enc = nn.Embedding(self.dn_labelbook_size + 1, self.embed_dims)
+        self.matcher_cfg = loss_cfg['matcher']
+        # 初始化matcher
+        self.matcher = HungarianMatcher(
+            cost_class=float(self.matcher_cfg['set_cost_class']),
+            cost_bbox=float(self.matcher_cfg['cost_bbox']),
+            cost_giou=float(self.matcher_cfg['cost_giou']),
+            focal_alpha=float(self.matcher_cfg['focal_alpha']),
+            cost_keypoints=float(self.matcher_cfg['cost_keypoints']),
+            cost_kpvis=float(self.matcher_cfg['cost_kpvis']),
+            cost_oks=float(self.matcher_cfg['cost_oks']),
+            num_body_points=int(self.matcher_cfg['num_body_points']))
 
-        # self.matcher=HungarianMatcher(loss_cfg['matcher'])#传入SetCriterion的参数
-        self.matcher=HungarianMatcher( 
-                cost_class=2.0,cost_bbox = 5.0,
-                cost_giou=2.0,focal_alpha = 0.25,
-                cost_keypoints=10.0,cost_kpvis=0.0,
-                cost_oks=4.0,num_body_points=17)
-        self.loss_weight_dict = loss_cfg['weight_dict']#传入SetCriterion的weight_dict参数
-        losses = ['labels', 'boxes', "keypoints","dn_label", "dn_bbox","matching"]#传入SetCriterion的参数
+        self.loss_weight_dict = loss_cfg['weight_dict']  # 传入SetCriterion的weight_dict参数
+        clean_weight_dict_wo_dn = copy.deepcopy(self.loss_weight_dict)
+        if loss_cfg['use_dn']:
+            self.loss_weight_dict.update({
+                'dn_loss_ce': 0.3,
+                'dn_loss_bbox': 0.5 * 0.5,
+                'dn_loss_giou': 2.0 * 0.5,
+            })
+        clean_weight_dict = copy.deepcopy(self.loss_weight_dict)
+        if loss_cfg['aux_loss']:
+                    aux_weight_dict = {}
+        for i in range(6 - 1):#ags.dec_layers
+            for k, v in clean_weight_dict.items():
+                if i < 2 and 'keypoints' in k:#args.num_box_decoder_layers
+                    continue
+                aux_weight_dict.update({k + f'_ {i}': v})
+            self.loss_weight_dict.update(aux_weight_dict)
+        if self.as_two_stage != False:
+            interm_weight_dict = {}
+            try:
+                no_interm_box_loss = False#self.no_interm_box_loss
+            except:
+                no_interm_box_loss = False
+            _coeff_weight_dict = {
+                'loss_ce': 1.0,
+                'loss_bbox': 1.0 if not no_interm_box_loss else 0.0,
+                'loss_giou': 1.0 if not no_interm_box_loss else 0.0,
+                'loss_keypoints': 1.0 if not no_interm_box_loss else 0.0,
+                'loss_oks': 1.0 if not no_interm_box_loss else 0.0,
+            }
+            try:
+                interm_loss_coef = 1.0#args.interm_loss_coef
+            except:
+                interm_loss_coef = 1.0
+            interm_weight_dict.update({k + f'_interm': v * interm_loss_coef * _coeff_weight_dict[k] for k, v in clean_weight_dict_wo_dn.items() if 'keypoints' not in k})
+            self.loss_weight_dict.update(interm_weight_dict)
+
+            interm_weight_dict.update({k + f'_query_expand': v * interm_loss_coef * _coeff_weight_dict[k] for k, v in clean_weight_dict_wo_dn.items()})
+            self.loss_weight_dict.update(interm_weight_dict)
+
+        losses = ['labels', 'boxes', "keypoints", "dn_label", "dn_bbox", "matching"]  # 传入SetCriterion的参数
+        # 初始化criterion
         self.criterion = SetCriterion(
             num_classes=2,
             matcher=self.matcher,
             weight_dict=self.loss_weight_dict,
             focal_alpha=loss_cfg["matcher"]['focal_alpha'],
             losses=losses,
-            num_box_decoder_layers = decoder['num_layers'],
+            num_box_decoder_layers=decoder['num_layers'],
             num_body_points=num_keypoints)
 
         if not self.as_two_stage:
-            self.query_embedding = nn.Embedding(self.num_queries,self.embed_dims)
+            self.query_embedding = nn.Embedding(self.num_queries,
+                                                self.embed_dims)
             self.refpoint_embedding = nn.Embedding(self.num_queries, 4)
 
-        self.level_embed = nn.Parameter(torch.Tensor(self.num_feature_levels, self.embed_dims))
+        self.level_embed = nn.Parameter(
+            torch.Tensor(self.num_feature_levels, self.embed_dims))
 
         self.decoder.bbox_embed = self.out_head.bbox_embed
         self.decoder.pose_embed = self.out_head.pose_embed
@@ -751,6 +788,7 @@ class EDPoseHead(TransformerHead):
                         batch_data_samples: OptSampleList = None
                         ) -> Tuple[Dict]:
         """Process image features before feeding them to the transformer.
+
         Args:
             img_feats (tuple[Tensor]): Multi-level features that may have
                 different resolutions, output from neck. Each feature has
@@ -759,9 +797,11 @@ class EDPoseHead(TransformerHead):
                 batch data samples. It usually includes information such
                 as `gt_instance` or `gt_panoptic_seg` or `gt_sem_seg`.
                 Defaults to None.
+
         Returns:
             tuple[dict]: The first dict contains the inputs of encoder and the
             second dict contains the inputs of decoder.
+
             - encoder_inputs_dict (dict): The keyword args dictionary of
               `self.encoder()`.
             - decoder_inputs_dict (dict): The keyword args dictionary of
@@ -779,6 +819,7 @@ class EDPoseHead(TransformerHead):
             masks[img_id, :img_h, :img_w] = 0
         # NOTE following the official DETR repo, non-zero values representing
         # ignored positions, while zero values means valid positions.
+
         mlvl_masks = []
         mlvl_pos_embeds = []
         for feat in img_feats:
@@ -835,30 +876,32 @@ class EDPoseHead(TransformerHead):
                 humandet_attn_mask = human2pose_attn_mask = mask_dict = None
 
         encoder_inputs_dict = dict(
-            query=feat_flatten,                 #(bs, sum(h*w), dim) 展平的多尺度特征
-            query_pos=lvl_pos_embed_flatten,    # (bs, sum(h*w), dim) 位置编码
-            key_padding_mask=mask_flatten,      #(bs, sum(h*w)) 填充掩码
-            spatial_shapes=spatial_shapes,      # (num_level, 2)每层特征的空间尺寸
-            level_start_index=level_start_index,# (num_levels,) 每层特征的起始索引
-            valid_ratios=valid_ratios)          # (bs, num_levels, 2) 有效区域比例
+            query=feat_flatten,
+            query_pos=lvl_pos_embed_flatten,
+            key_padding_mask=mask_flatten,
+            spatial_shapes=spatial_shapes,
+            level_start_index=level_start_index,
+            valid_ratios=valid_ratios)
         decoder_inputs_dict = dict(
-            memory_mask=mask_flatten,           # (bs, sum(h*w)) 记忆掩码
-            spatial_shapes=spatial_shapes,      # (num_level, 2)每层特征的空间尺寸
-            level_start_index=level_start_index,# (num_levels,) 每层特征的起始索引
-            valid_ratios=valid_ratios,          # (bs, num_levels, 2) 有效区域比例
-            humandet_attn_mask=humandet_attn_mask,# 人体检测注意力掩码
-            human2pose_attn_mask=human2pose_attn_mask,# 人体姿态估计注意力掩码
-            input_query_bbox=input_query_bbox,  # 去噪训练的边界框查询
-            input_query_label=input_query_label,# 去噪训练的标签查询
-            mask_dict=mask_dict)                # 去噪训练相关的掩码字典
+            memory_mask=mask_flatten,
+            spatial_shapes=spatial_shapes,
+            level_start_index=level_start_index,
+            valid_ratios=valid_ratios,
+            humandet_attn_mask=humandet_attn_mask,
+            human2pose_attn_mask=human2pose_attn_mask,
+            input_query_bbox=input_query_bbox,
+            input_query_label=input_query_label,
+            mask_dict=mask_dict)
         return encoder_inputs_dict, decoder_inputs_dict
 
     def forward_encoder(self,
                         img_feats: Tuple[Tensor],
                         batch_data_samples: OptSampleList = None) -> Dict:
         """Forward with Transformer encoder.
+
         The forward procedure is defined as:
         'pre_transformer' -> 'encoder'
+
         Args:
             img_feats (tuple[Tensor]): Multi-level features that may have
                 different resolutions, output from neck. Each feature has
@@ -867,11 +910,14 @@ class EDPoseHead(TransformerHead):
                 batch data samples. It usually includes information such
                 as `gt_instance` or `gt_panoptic_seg` or `gt_sem_seg`.
                 Defaults to None.
+
         Returns:
             dict: The dictionary of encoder outputs, which includes the
             `memory` of the encoder output.
         """
-        encoder_inputs_dict, decoder_inputs_dict = self.pre_transformer(img_feats, batch_data_samples)
+        encoder_inputs_dict, decoder_inputs_dict = self.pre_transformer(
+            img_feats, batch_data_samples)
+
         memory = self.encoder(**encoder_inputs_dict)
         encoder_outputs_dict = dict(memory=memory, **decoder_inputs_dict)
         return encoder_outputs_dict
@@ -894,23 +940,16 @@ class EDPoseHead(TransformerHead):
             input_query_label (Tensor): Denosing label query for training.
         Returns:
             tuple[dict, dict]: The decoder_inputs_dict and head_inputs_dict.
-
-            - decoder_inputs_dict (dict): The keyword dictionary args of
-              `self.decoder()`.
-            - head_inputs_dict (dict): The keyword dictionary args of the
-              bbox_head functions.
+            - decoder_inputs_dict (dict): The keyword dictionary args of`self.decoder()`.
+            - head_inputs_dict (dict): The keyword dictionary args of thebbox_head functions.
         """
         bs, _, c = memory.shape
         if self.as_two_stage:
             output_memory, output_proposals = \
-                self.gen_encoder_output_proposals(
-                    memory, memory_mask, spatial_shapes)
+                self.gen_encoder_output_proposals(memory, memory_mask, spatial_shapes)
             enc_outputs_class = self.enc_out_class_embed(output_memory)
-            enc_outputs_coord_unact = self.enc_out_bbox_embed(
-                output_memory) + output_proposals
-
-            topk_proposals = torch.topk(
-                enc_outputs_class.max(-1)[0], self.num_queries, dim=1)[1]
+            enc_outputs_coord_unact = self.enc_out_bbox_embed( output_memory) + output_proposals
+            topk_proposals = torch.topk(enc_outputs_class.max(-1)[0], self.num_queries, dim=1)[1]
             topk_coords_undetach = torch.gather(
                 enc_outputs_coord_unact, 1,
                 topk_proposals.unsqueeze(-1).repeat(1, 1, 4))
@@ -934,10 +973,8 @@ class EDPoseHead(TransformerHead):
                 referens_enc = topk_coords_undetach.sigmoid().unsqueeze(0)
         else:
             hidden_states_enc, referens_enc = None, None
-            query = self.query_embedding.weight[:, None, :].repeat(
-                1, bs, 1).transpose(0, 1)
-            reference_points = \
-                self.refpoint_embedding.weight[:, None, :].repeat(1, bs, 1)
+            query = self.query_embedding.weight[:, None, :].repeat(1, bs, 1).transpose(0, 1)
+            reference_points = self.refpoint_embedding.weight[:, None, :].repeat(1, bs, 1)
 
             if input_query_bbox is not None:
                 reference_points = torch.cat(
@@ -945,8 +982,10 @@ class EDPoseHead(TransformerHead):
                 query = torch.cat([input_query_label, query], dim=1)
             reference_points = reference_points.sigmoid()
 
-        decoder_inputs_dict = dict(query=query, reference_points=reference_points)
-        head_inputs_dict = dict(hidden_states_enc=hidden_states_enc, referens_enc=referens_enc)
+        decoder_inputs_dict = dict(
+            query=query, reference_points=reference_points)
+        head_inputs_dict = dict(
+            hidden_states_enc=hidden_states_enc, referens_enc=referens_enc)
         return decoder_inputs_dict, head_inputs_dict
 
     def forward_decoder(self, memory: Tensor, memory_mask: Tensor,
@@ -996,9 +1035,9 @@ class EDPoseHead(TransformerHead):
             human2pose_attn_mask=human2pose_attn_mask)
         references = inter_references
         decoder_outputs_dict = dict(
-            hidden_states=inter_states,     # (num_dec_layers, bs, num_queries, dim)解码器输出的特征状态序列
-            references=references,          # (num_dec_layers, bs, num_queries, 4)参考点坐标序列，包含初始和中间的参考点
-            mask_dict=mask_dict)            # 去噪训练相关的掩码字典
+            hidden_states=inter_states,
+            references=references,
+            mask_dict=mask_dict)
         decoder_outputs_dict.update(head_in)
         return decoder_outputs_dict
 
@@ -1010,7 +1049,17 @@ class EDPoseHead(TransformerHead):
         out = self.out_head(hidden_states, references, mask_dict,
                             hidden_states_enc, referens_enc,
                             batch_data_samples)
-        return out  #out实际上是EDPoseOuthead的输出
+        return out
+
+    def train_forward_out_head(self, batch_data_samples: OptSampleList,
+                         hidden_states: List[Tensor], references: List[Tensor],
+                         mask_dict: Dict, hidden_states_enc: Tensor,
+                         referens_enc: Tensor) -> Tuple[List[Tensor], List[Tensor], List[Tensor], Dict]:
+        outputs_class, outputs_coord, outputs_keypoints, updated_mask_dict = \
+        self.out_head(hidden_states, references, mask_dict,
+                          hidden_states_enc, referens_enc,
+                          batch_data_samples)
+        return outputs_class, outputs_coord, outputs_keypoints, updated_mask_dict
 
     def predict(self,
                 feats: Features,
@@ -1018,14 +1067,14 @@ class EDPoseHead(TransformerHead):
                 test_cfg: ConfigType = {}) -> Predictions:
         """Predict results from features."""
         input_shapes = np.array(
-            [d.metainfo['batch_input_shape'] for d in batch_data_samples])
+            [d.metainfo['input_size'] for d in batch_data_samples])
 
         if test_cfg.get('flip_test', False):
             assert NotImplementedError(
                 'flip_test is currently not supported '
                 'for EDPose. Please set `model.test_cfg.flip_test=False`')
         else:
-            pred_logits, pred_boxes, pred_keypoints = self.forward(feats, batch_data_samples)  # (B, K, D)
+            pred_logits, pred_boxes, pred_keypoints ,mask_dict= self.forward(feats, batch_data_samples)  # (B, K, D)
 
             pred = self.decode(
                 input_shapes,
@@ -1038,13 +1087,16 @@ class EDPoseHead(TransformerHead):
                pred_boxes: Tensor, pred_keypoints: Tensor):
         """Select the final top-k keypoints, and decode the results from
         normalize size to origin input size.
+
         Args:
             input_shapes (Tensor): The size of input image.
             pred_logits (Tensor): The result of score.
             pred_boxes (Tensor): The result of bbox.
             pred_keypoints (Tensor): The result of keypoints.
+
         Returns:
         """
+
         if self.data_decoder is None:
             raise RuntimeError(f'The data decoder has not been set in \
                 {self.__class__.__name__}. '
@@ -1054,8 +1106,10 @@ class EDPoseHead(TransformerHead):
                      `head.decode()`')
 
         preds = []
+
         pred_logits = pred_logits.sigmoid()
-        pred_logits, pred_boxes, pred_keypoints = to_numpy([pred_logits, pred_boxes, pred_keypoints])
+        pred_logits, pred_boxes, pred_keypoints = to_numpy(
+            [pred_logits, pred_boxes, pred_keypoints])
 
         for input_shape, pred_logit, pred_bbox, pred_kpts in zip(
                 input_shapes, pred_logits, pred_boxes, pred_keypoints):
@@ -1065,10 +1119,10 @@ class EDPoseHead(TransformerHead):
 
             # pack outputs
             preds.append(
-                InstanceData(                           #num_instances : 检测到的人体实例数量
-                    keypoints=keypoints,                # (num_instances, num_keypoints, 3) 3 : 每个关键点的三个值 (x, y, visibility)
-                    keypoint_scores=keypoint_scores,    # (num_instances, num_keypoints)
-                    bboxes=bboxes))                    # (num_instances, 4) 4 : 边界框的四个值 (x1, y1, x2, y2)，表示左上角和右下角的坐标
+                InstanceData(
+                    keypoints=keypoints,
+                    keypoint_scores=keypoint_scores,
+                    bboxes=bboxes))
 
         return preds
 
@@ -1077,6 +1131,7 @@ class EDPoseHead(TransformerHead):
                                      ) -> Tuple[Tensor, Tensor]:
         """Generate proposals from encoded memory. The function will only be
         used when `as_two_stage` is `True`.
+
         Args:
             memory (Tensor): The output embeddings of the Transformer encoder,
                 has shape (bs, num_feat_points, dim).
@@ -1084,8 +1139,10 @@ class EDPoseHead(TransformerHead):
                 has shape (bs, num_feat_points).
             spatial_shapes (Tensor): Spatial shapes of features in all levels,
                 has shape (num_levels, 2), last dimension represents (h, w).
+
         Returns:
             tuple: A tuple of transformed memory and proposals.
+
             - output_memory (Tensor): The transformed memory for obtaining
               top-k proposals, has shape (bs, num_feat_points, dim).
             - output_proposals (Tensor): The inverse-normalized proposal, has
@@ -1096,7 +1153,8 @@ class EDPoseHead(TransformerHead):
         proposals = []
         _cur = 0  # start index in the sequence of the current level
         for lvl, (H, W) in enumerate(spatial_shapes):
-            mask_flatten_ = memory_mask[:,_cur:(_cur + H * W)].view(bs, H, W, 1)
+            mask_flatten_ = memory_mask[:,
+                                        _cur:(_cur + H * W)].view(bs, H, W, 1)
             valid_H = torch.sum(~mask_flatten_[:, :, 0, 0], 1).unsqueeze(-1)
             valid_W = torch.sum(~mask_flatten_[:, 0, :, 0], 1).unsqueeze(-1)
 
@@ -1115,7 +1173,8 @@ class EDPoseHead(TransformerHead):
             _cur += (H * W)
         output_proposals = torch.cat(proposals, 1)
         output_proposals_valid = ((output_proposals > 0.01) &
-                                  (output_proposals < 0.99)).all(-1, keepdim=True)
+                                  (output_proposals < 0.99)).all(
+                                      -1, keepdim=True)
 
         output_proposals = inverse_sigmoid(output_proposals)
         output_proposals = output_proposals.masked_fill(
@@ -1124,13 +1183,13 @@ class EDPoseHead(TransformerHead):
             ~output_proposals_valid, float('inf'))
 
         output_memory = memory
-        output_memory = output_memory.masked_fill(memory_mask.unsqueeze(-1), float(0))
-        output_memory = output_memory.masked_fill(~output_proposals_valid,float(0))
+        output_memory = output_memory.masked_fill(
+            memory_mask.unsqueeze(-1), float(0))
+        output_memory = output_memory.masked_fill(~output_proposals_valid,
+                                                  float(0))
         output_memory = self.memory_trans_fc(output_memory)
         output_memory = self.memory_trans_norm(output_memory)
         # [bs, sum(hw), 2]
-        #output_memory : (bs, num_feat_points, dim)
-        #output_proposals : (bs, num_feat_points, 4)
         return output_memory, output_proposals
 
     @property
@@ -1168,50 +1227,19 @@ class EDPoseHead(TransformerHead):
             attn_mask_infere = attn_mask_infere.flatten(0, 1)
             return None, None, None, attn_mask_infere, None
 
-        # targets, dn_scalar, noise_scale = dn_args
-        # 处理numpy数组类型的输入数据
-        if isinstance(targets[0], dict):
-            device = torch.device(device)
-            bs = len(targets)
-            refine_queries_num = self.refine_queries_num
-
-            # 将numpy数组转换为tensor
-            gt_boxes = [t['bboxes'].to(device) if 'bboxes' in t else torch.empty((0, 4), device=device) for t in targets]
-            gt_labels = [t['labels'].to(device) if 'labels' in t else torch.empty(0, device=device) for t in targets]
-            gt_keypoints = [t['keypoints'].to(device) if 'keypoints' in t else torch.empty((0, self.num_keypoints, 3), device=device) for t in targets]
-        else:
-            # 处理PoseDataSample类型的输入数据
-            bs = len(targets)
-            refine_queries_num = self.refine_queries_num
-            if not isinstance(device, torch.device):
-                device = torch.device(device)
-            
-            gt_boxes = []
-            gt_labels = []
-            gt_keypoints = []
-            
-            for t in targets:
-                if hasattr(t, 'gt_instances') and hasattr(t.gt_instances, 'bboxes'):
-                    # 确保bboxes在正确的设备上
-                    bboxes = t.gt_instances.bboxes.to(device) if hasattr(t.gt_instances.bboxes, 'to') else t.gt_instances.bboxes
-                    gt_boxes.append(bboxes)
-                    # 为每个bbox创建标签（假设只有人这一类）
-                    gt_labels.append(torch.zeros(bboxes.shape[0], dtype=torch.long, device=device))
-                    
-                    # 处理关键点数据
-                    if hasattr(t.gt_instances, 'keypoints'):
-                        keypoints = t.gt_instances.keypoints
-                        # 确保keypoints在正确的设备上
-                        if hasattr(keypoints, 'to'):
-                            keypoints = keypoints.to(device)
-                        gt_keypoints.append(keypoints)
-                    else:
-                        gt_keypoints.append(torch.zeros((bboxes.shape[0], self.num_keypoints, 3), device=device))
-                else:
-                    # 如果没有gt_instances或bboxes，添加空张量
-                    gt_boxes.append(torch.empty((0, 4), device=device))
-                    gt_labels.append(torch.empty(0, device=device))
-                    gt_keypoints.append(torch.empty((0, self.num_keypoints, 3), device=device))
+        bs = len(targets)
+        refine_queries_num = self.refine_queries_num
+        bs = len(targets)
+        refine_queries_num = self.refine_queries_num
+        gt_boxes = []
+        gt_labels = []
+        gt_keypoints = []
+        for t in targets:
+            bboxes = torch.tensor(t.gt_instances.bboxes, device=device)
+            gt_boxes.append(bboxes)
+            gt_labels.append(torch.zeros(bboxes.shape[0], dtype=torch.long, device=device))
+            keypoints = torch.tensor(t.gt_instances.keypoints, device=device)
+            gt_keypoints.append(keypoints)
 
         # repeat them
         def get_indices_for_repeat(now_num, target_num, device='cuda'):
@@ -1227,55 +1255,30 @@ class EDPoseHead(TransformerHead):
             multiplier = target_num // now_num
             out_indice.append(base_indice.repeat(multiplier))
             residue = target_num % now_num
-            out_indice.append(base_indice[torch.randint(
-                0, now_num, (residue, ), device=device)])
+            out_indice.append(base_indice[torch.randint(0, now_num, (residue, ), device=device)])
             return torch.cat(out_indice)
 
         gt_boxes_expand = []
         gt_labels_expand = []
         gt_keypoints_expand = []
-        for idx, (gt_boxes_i, gt_labels_i, gt_keypoint_i) in enumerate(
-                zip(gt_boxes, gt_labels, gt_keypoints)):
+        for idx, (gt_boxes_i, gt_labels_i, gt_keypoint_i) in enumerate(zip(gt_boxes, gt_labels, gt_keypoints)):
             num_gt_i = gt_boxes_i.shape[0]
             if num_gt_i > 0:
-                # 确保indices在与gt_boxes_i相同的设备上
-                # 检查gt_boxes_i是否为numpy数组，如果是则使用device参数
-                if isinstance(gt_boxes_i, torch.Tensor) and hasattr(gt_boxes_i, 'device'):
-                    indices = get_indices_for_repeat(num_gt_i, refine_queries_num, gt_boxes_i.device)
-                else:
-                    # 如果gt_boxes_i是numpy数组或没有device属性，使用当前device
-                    indices = get_indices_for_repeat(num_gt_i, refine_queries_num, device)
-                # 确保gt_boxes_i是张量并且在正确的设备上
-                if not isinstance(gt_boxes_i, torch.Tensor):
-                    gt_boxes_i = torch.tensor(gt_boxes_i, device=device)
-                elif gt_boxes_i.device != indices.device:
-                    gt_boxes_i = gt_boxes_i.to(indices.device)
-                
-                # 同样确保gt_labels_i和gt_keypoint_i也是张量并在正确的设备上
-                if not isinstance(gt_labels_i, torch.Tensor):
-                    gt_labels_i = torch.tensor(gt_labels_i, device=device)
-                elif gt_labels_i.device != indices.device:
-                    gt_labels_i = gt_labels_i.to(indices.device)
-                
-                if not isinstance(gt_keypoint_i, torch.Tensor):
-                    gt_keypoint_i = torch.tensor(gt_keypoint_i, device=device)
-                elif gt_keypoint_i.device != indices.device:
-                    gt_keypoint_i = gt_keypoint_i.to(indices.device)
+                indices = get_indices_for_repeat(num_gt_i, refine_queries_num, device)
                 
                 gt_boxes_expand_i = gt_boxes_i[indices]  # num_dn, 4
                 gt_labels_expand_i = gt_labels_i[indices]
-                gt_keypoints_expand_i = gt_keypoint_i[indices]# 维度为[100, 17, 2]
+                gt_keypoints_expand_i = gt_keypoint_i[indices]
             else:
                 # all negative samples when no gt boxes
-                gt_boxes_expand_i = torch.rand(
-                    refine_queries_num, 4, device=device)
+                gt_boxes_expand_i = torch.rand(refine_queries_num, 4, device=device)
                 gt_labels_expand_i = torch.ones(
                     refine_queries_num, dtype=torch.int64,
                     device=device) * int(self.num_classes)
-                # gt_keypoints_expand_i = torch.rand(
-                #     refine_queries_num, self.num_keypoints * 3, device=device)## 维度为[100, 51]
                 gt_keypoints_expand_i = torch.rand(
-                     refine_queries_num, self.num_keypoints, 2, device=device)  # 没有人的时候保持维度一至[100, 17, 2]
+                    refine_queries_num, self.num_keypoints * 3, device=device)## 维度为[100, 51]
+                # gt_keypoints_expand_i = torch.rand(
+                #      refine_queries_num, self.num_keypoints, 2, device=device)  # 没有人的时候保持维度一至[100, 17, 2]
 
             gt_boxes_expand.append(gt_boxes_expand_i)
             gt_labels_expand.append(gt_labels_expand_i)
@@ -1390,31 +1393,21 @@ class EDPoseHead(TransformerHead):
              feats: Tuple[Tensor],
              batch_data_samples: OptSampleList,
              train_cfg: OptConfigType = {}) -> dict:
-        """Calculate losses from a batch of inputs and data samples.
-        Args:
-            feats (Tuple[Tensor]): The multi-stage features from backbone.
-            batch_data_samples (List[:obj:`PoseDataSample`]): The batch
-                data samples.
-            train_cfg (dict): The runtime config for training process.
-                Defaults to {}.
-        Returns:
-            dict: A dictionary of losses.
-        """
-        # 1. 获取预测结果
-        pred_logits, pred_boxes, pred_keypoints = self.forward(feats, batch_data_samples)
-        # 2. 准备targets
+        """Calculate losses from a batch of inputs and data samples."""
+        encoder_outputs_dict = self.forward_encoder(feats, batch_data_samples)
+        decoder_outputs_dict = self.forward_decoder(**encoder_outputs_dict)
+        pred_logits,pred_boxes,pred_keypoints,mask_dict=\
+        self.train_forward_out_head(batch_data_samples, 
+                                     decoder_outputs_dict['hidden_states'],
+                                     decoder_outputs_dict['references'],
+                                     decoder_outputs_dict['mask_dict'],
+                                     decoder_outputs_dict['hidden_states_enc'],
+                                     decoder_outputs_dict['referens_enc'])
         targets = []
         for data_sample in batch_data_samples:
             gt_instances = data_sample.gt_instances
             target = {}
-            # 使用bbox_scores作为标签（类别）
-            # 由于gt_instances没有labels属性，我们使用bbox_scores代替
-            # 假设所有实例都是人类（类别1）
             target['labels'] = torch.ones_like(torch.as_tensor(gt_instances.bbox_scores, device=pred_logits.device), dtype=torch.long)
-    
-            # 获取边界框（归一化坐标）
-            # 将边界框坐标从xyxy格式转换为cxcywh格式
-            # 检查bboxes是否为numpy数组，如果是则转换为tensor
             if isinstance(gt_instances.bboxes, np.ndarray):
                 bboxes_tensor = torch.from_numpy(gt_instances.bboxes).to(device=pred_logits.device)
             else:
@@ -1425,40 +1418,32 @@ class EDPoseHead(TransformerHead):
             # 确保图像尺寸是有效的
             img_h = float(img_h)
             img_w = float(img_w)
-            
             # 归一化边界框坐标到[0,1]范围
             cx = (x1 + x2) / 2 / img_w
             cy = (y1 + y2) / 2 / img_h
             w = (x2 - x1) / img_w
             h = (y2 - y1) / img_h
             target['boxes'] = torch.stack([cx, cy, w, h], dim=-1)
-            target['image_id'] = data_sample.img_id
-            target['iscrowd']=data_sample.metainfo['raw_ann_info'][0]['iscrowd']
-            target['orig_size']=data_sample.ori_shape
-            target['size']=data_sample.img_shape
-            # 保存原始图像尺寸信息，以便在criterion中使用
-            # 确保图像尺寸是张量类型
+            target['area']=torch.tensor([data_sample.raw_ann_info[0]['area']/(img_w*img_h)], device=pred_logits.device)
+            target['image_id'] = torch.tensor(data_sample.img_id, device=pred_logits.device)
+            target['iscrowd'] = torch.tensor(data_sample.metainfo['raw_ann_info'][0]['iscrowd'], device=pred_logits.device)
+            target['orig_size'] = torch.tensor(data_sample.ori_shape, device=pred_logits.device)
+            target['size'] = torch.tensor(data_sample.img_shape, device=pred_logits.device)
             target['input_height'] = torch.tensor(img_h, device=pred_logits.device)
             target['input_width'] = torch.tensor(img_w, device=pred_logits.device)
-            # 获取关键点坐标和可见性
-            # 检查keypoints是否为numpy数组，如果是则转换为tensor
             if isinstance(gt_instances.keypoints, np.ndarray):
                 keypoints = torch.from_numpy(gt_instances.keypoints).to(device=pred_logits.device)
             else:
-                keypoints = gt_instances.keypoints
-                
-            # 检查keypoints_visible是否为numpy数组，如果是则转换为tensor
+                keypoints = gt_instances.keypoints    
             if isinstance(gt_instances.keypoints_visible, np.ndarray):
                 keypoints_visible = torch.from_numpy(gt_instances.keypoints_visible).to(device=pred_logits.device)
             else:
                 keypoints_visible = gt_instances.keypoints_visible
-            
             # 关键点格式转换为模型需要的格式
             # 将keypoints和keypoints_visible合并为一个张量
             # 原始keypoints形状为(num_instances, num_keypoints, 2)，表示(x, y)
             # keypoints_visible形状为(num_instances, num_keypoints)，表示可见性
             num_instances, num_keypoints = keypoints_visible.shape
-            
             # 创建包含坐标和可见性的完整关键点表示
             # criterion.py中的loss_keypoints函数期望keypoints的格式为[x1,y1,x2,y2,...,v1,v2,...]
             keypoints_flat = torch.zeros((num_instances, num_keypoints * 3), device=pred_logits.device)
@@ -1471,38 +1456,91 @@ class EDPoseHead(TransformerHead):
                 keypoints_flat[:, num_keypoints*2+i] = keypoints_visible[:, i]  # 可见性
             target['keypoints'] = keypoints_flat
             
-            # 计算每个实例的面积，用于OKS计算
-            # 使用边界框面积作为area
-            target['area'] = w * h
             targets.append(target)
             
         # 3. 准备outputs字典
+        # 使用辅助函数处理关键点格式转换
+        def reformat_keypoints_for_criterion(keypoints_raw_layer, bs, nkpt):
+            reformatted_kpts_list = []
+            for i in range(bs):
+                curr_pred_keypoints_single_batch = keypoints_raw_layer[i] # (num_queries, num_keypoints * 3)
+                reformatted_layer_kpts = torch.zeros_like(curr_pred_keypoints_single_batch)
+                for j in range(nkpt):
+                    reformatted_layer_kpts[:, j*2] = curr_pred_keypoints_single_batch[:, j*3]
+                    reformatted_layer_kpts[:, j*2+1] = curr_pred_keypoints_single_batch[:, j*3+1]
+                    reformatted_layer_kpts[:, nkpt*2+j] = curr_pred_keypoints_single_batch[:, j*3+2]
+                reformatted_kpts_list.append(reformatted_layer_kpts)
+            return torch.stack(reformatted_kpts_list)
+
         batch_size = len(batch_data_samples)
-        normalized_pred_keypoints = []
-        
-        for i in range(batch_size):
-            # 提取当前批次的预测关键点
-            curr_pred_keypoints = pred_keypoints[i]
-            # 重新排列关键点格式为criterion.py期望的格式：[x1,y1,x2,y2,...,v1,v2,...]
-            normalized_keypoints = torch.zeros_like(curr_pred_keypoints)
-            for j in range(num_keypoints):
-                normalized_keypoints[:, j*2] = curr_pred_keypoints[:, j*3]
-                normalized_keypoints[:, j*2+1] = curr_pred_keypoints[:, j*3+1]
-                # 复制可见性值到后半部分
-                normalized_keypoints[:, num_keypoints*2+j] = curr_pred_keypoints[:, j*3+2]
-            normalized_pred_keypoints.append(normalized_keypoints)
-        
-        # 将列表转换回张量
-        normalized_pred_keypoints = torch.stack(normalized_pred_keypoints)
-        
+        #pred_keypoints = reformat_keypoints_for_criterion(pred_keypoints_last_layer_raw, batch_size, self.num_keypoints)
+        pred_keypoints = reformat_keypoints_for_criterion(pred_keypoints, batch_size, self.num_keypoints)
         outputs = {
             'pred_logits': pred_logits,  # 预测的类别得分
             'pred_boxes': pred_boxes,    # 预测的边界框
-            'pred_keypoints': normalized_pred_keypoints  # 归一化后的预测关键点
-        } 
+            'pred_keypoints': pred_keypoints  # 归一化并重排后的预测关键点
+        }
+
+        outputs_known_lbs_bboxes = {}
+        if self.use_dn and mask_dict is not None:
+            if 'known_labels' in mask_dict:
+                outputs_known_lbs_bboxes['labels'] = mask_dict['known_labels']
+            if 'known_bboxs' in mask_dict:
+                outputs_known_lbs_bboxes['boxes'] = mask_dict['known_bboxs']
+            if 'known_keypoints' in mask_dict: # If DN for keypoints is implemented
+                 outputs_known_lbs_bboxes['keypoints'] = mask_dict['known_keypoints']
+                 
+            # Add DN predictions and num_tgt to outputs for the last layer
+            if 'output_known_class' in mask_dict and mask_dict['output_known_class']:
+                outputs['dn_class_pred'] = mask_dict['output_known_class'][-1]
+            if 'output_known_coord' in mask_dict and mask_dict['output_known_coord']:
+                outputs['dn_bbox_pred'] = mask_dict['output_known_coord'][-1]
+            if 'known_labels' in mask_dict:
+                outputs['dn_class_input'] = mask_dict['known_labels']
+            if 'known_bboxs' in mask_dict:
+                outputs['dn_bbox_input'] = mask_dict['known_bboxs']
+            if 'pad_size' in mask_dict:
+                outputs['num_tgt'] = mask_dict['pad_size']
+
+        if self.aux_loss:
+            aux_outputs = []
+            num_dec_layers = self.decoder.num_layers
+            # Ensure all_outputs_keypoints_raw has enough elements for aux loss calculation
+            for i in range(num_dec_layers - 1):
+                aux_pred_logits_layer = all_outputs_class[i]
+                aux_pred_boxes_layer = all_outputs_coord[i]
+                aux_pred_keypoints_raw_layer = all_outputs_keypoints_raw[i]
+                aux_pred_keypoints_layer = reformat_keypoints_for_criterion(aux_pred_keypoints_raw_layer, batch_size, self.num_keypoints)
+                
+                # 构建与原始EDPose实现一致的aux_item结构
+                aux_item = {
+                    'pred_logits': aux_pred_logits_layer,
+                    'pred_boxes': aux_pred_boxes_layer,
+                    'pred_keypoints': aux_pred_keypoints_layer
+                }
+                
+                # 添加DN相关的字段，确保与原始EDPose实现一致
+                if self.dn_number > 0 and mask_dict is not None:
+                    # 添加dn_class_pred和dn_bbox_pred
+                    if 'output_known_class' in mask_dict and i < len(mask_dict['output_known_class']):
+                        aux_item['dn_class_pred'] = mask_dict['output_known_class'][i]
+                    if 'output_known_coord' in mask_dict and i < len(mask_dict['output_known_coord']):
+                        aux_item['dn_bbox_pred'] = mask_dict['output_known_coord'][i]
+                    
+                    # 添加dn_class_input和dn_bbox_input
+                    if 'known_labels' in mask_dict:
+                        aux_item['dn_class_input'] = mask_dict['known_labels']
+                    if 'known_bboxs' in mask_dict:
+                        aux_item['dn_bbox_input'] = mask_dict['known_bboxs']
+                    
+                    # 添加num_tgt
+                    if 'pad_size' in mask_dict:
+                        aux_item['num_tgt'] = mask_dict['pad_size']
+                
+                aux_outputs.append(aux_item)
+            outputs['aux_outputs'] = aux_outputs
         
         # 4. 使用criterion计算损失
-        losses = self.criterion(outputs, targets)
-        
-        # 5. 返回损失字典
+        # losses = self.criterion(outputs, targets)#可以仅传入pred_logits，pred_boxes，pred_keypoints进行损失计算
+        losses = self.criterion(outputs, targets, outputs_known_lbs_bboxes if self.use_dn and outputs_known_lbs_bboxes else None)
         return losses
