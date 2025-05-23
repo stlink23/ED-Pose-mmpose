@@ -53,7 +53,7 @@ auto_scale_lr = dict(base_batch_size=80)
 default_hooks.update(  # noqa
     checkpoint=dict(
         save_best='coco/AP', rule='greater',interval=1,max_keep_ckpts=3,
-        out_dir=""),
+        out_dir="work_dir"),
     visualization=dict(
         type='mmpose.engine.hooks.visualization_hook.PoseVisualizationHook',
         enable=True,
@@ -172,7 +172,7 @@ find_unused_parameters = True
 # base dataset settings
 dataset_type = CocoDataset
 data_mode = 'bottomup'
-data_root = ''
+data_root = 'coco2017'
 
 # pipelines
 train_pipeline = [
@@ -190,25 +190,25 @@ train_pipeline = [
                             (736, 1333), (768, 1333), (800, 1333)],
                     keep_ratio=True)
             ],
-            # [
-            #     dict(
-            #         type=BottomupRandomChoiceResize,
-            #         # The radio of all image in train dataset < 7
-            #         # follow the original implement
-            #         scales=[(400, 4200), (500, 4200), (600, 4200)],
-            #         keep_ratio=True),
-            #     dict(
-            #         type=BottomupRandomCrop,
-            #         crop_type='absolute_range',
-            #         crop_size=(384, 600),
-            #         allow_negative_crop=True),
-            #     dict(
-            #         type=BottomupRandomChoiceResize,
-            #         scales=[(480, 1333), (512, 1333), (544, 1333), (576, 1333),
-            #                 (608, 1333), (640, 1333), (672, 1333), (704, 1333),
-            #                 (736, 1333), (768, 1333), (800, 1333)],
-            #         keep_ratio=True)
-            # ]
+            [
+                dict(
+                    type=BottomupRandomChoiceResize,
+                    # The radio of all image in train dataset < 7
+                    # follow the original implement
+                    scales=[(400, 4200), (500, 4200), (600, 4200)],
+                    keep_ratio=True),
+                dict(
+                    type=BottomupRandomCrop,
+                    crop_type='absolute_range',
+                    crop_size=(384, 600),
+                    allow_negative_crop=True),
+                dict(
+                    type=BottomupRandomChoiceResize,
+                    scales=[(480, 1333), (512, 1333), (544, 1333), (576, 1333),
+                            (608, 1333), (640, 1333), (672, 1333), (704, 1333),
+                            (736, 1333), (768, 1333), (800, 1333)],
+                    keep_ratio=True)
+            ]
         ]),
     dict(type=PackPoseInputs),
     #mmpose.datasets.transforms.common_transforms.GetBBoxCenterScale(padding: float = 1.25)
